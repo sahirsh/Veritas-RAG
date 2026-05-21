@@ -1,0 +1,11 @@
+fastapi
+python-multipart
+httpx>=0.27
+uvicorn[standard]
+psycopg[binary]
+sqlalchemy>=2.0
+alembic
+pymupdf
+google-genai
+groq
+pgvector
