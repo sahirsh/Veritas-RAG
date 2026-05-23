@@ -1,0 +1,34 @@
+# Render Blueprint — deploys the Veritas-RAG FastAPI backend.
+#
+
+services:
+  - type: web
+    name: veritas-rag-api
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # ── Secrets 
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ── Defaults 
+      - key: GEMINI_EMBEDDING_MODEL
+        value: gemini-embedding-001
+      - key: GROQ_CHAT_MODEL
+        value: llama-3.1-8b-instant
+      - key: UPLOAD_DIR
+        value: /app/uploads
+      - key: PORT
+        value: "8000"
+
+     
+      - key: CORS_ORIGINS
+        value: "*"

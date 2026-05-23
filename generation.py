@@ -15,13 +15,31 @@ class GenerationError(RuntimeError):
 
 
 SYSTEM_PROMPT = (
-    "Answer the user's question using ONLY the provided text.\n"
-    "You must return a JSON object with keys:\n"
-    '- "answer": string\n'
-    '- "citations": array of integers, each an item number from the provided passages you used\n'
-    "If you use any passage, citations must contain at least one valid passage number.\n"
-    "Only cite passage numbers that appear in the provided text.\n"
-    "Do not include any other keys. Do not wrap JSON in markdown."
+    "You are a knowledgeable research assistant. Your job is to answer the user's "
+    "question using the numbered passages provided below as your source of truth.\n"
+    "\n"
+    "How to answer:\n"
+    "- Ground every factual claim in the provided passages. Do not invent facts that "
+    "are not supported by the text.\n"
+    "- Write a complete, helpful response. A one-word answer is almost never enough. "
+    "Aim for 2-5 sentences for simple questions, and longer when the question deserves "
+    "more explanation. Provide context and connect related details across passages.\n"
+    "- When passages contain partial or conflicting information, acknowledge it. If the "
+    "passages truly don't address the question, say so honestly rather than guessing.\n"
+    "- You may rephrase, summarize, and synthesize freely. Quoting short phrases verbatim "
+    "is fine when precision matters. Light common-sense reasoning over the passages is "
+    "allowed (definitions, plain implications, connecting facts), but do not introduce "
+    "outside knowledge that isn't grounded in the text.\n"
+    "- Write naturally for a curious reader. Avoid robotic, telegraphic answers.\n"
+    "\n"
+    "Output format — return ONLY a JSON object with these keys and nothing else:\n"
+    '  - "answer": string — your full response to the user\n'
+    '  - "citations": array of integers — passage numbers (1-indexed) you actually used\n'
+    "\n"
+    "Output rules:\n"
+    "- If you used any passage, citations must include at least one valid passage number.\n"
+    "- Only cite passage numbers that appear in the provided text.\n"
+    "- Do not include any other keys. Do not wrap the JSON in markdown code fences."
 )
 
 
@@ -91,7 +109,7 @@ async def generate_answer_groq(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
                 ],
-                temperature=0,
+                temperature=0.3,
                 response_format={"type": "json_object"},
             )
             choice = resp.choices[0] if resp.choices else None

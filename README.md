@@ -2,6 +2,8 @@
 
 PDF question-answering API backed by PostgreSQL + [pgvector](https://github.com/pgvector/pgvector), Gemini embeddings, and Groq chat inference.
 
+**Live demo:** _coming soon_ — <!-- TODO: replace with deployed Streamlit URL -->
+
 ## What it does
 
 1. **Upload** a PDF -> text extraction -> chunking -> **Gemini embeddings** (one batched API call per up to 128 chunks) -> vectors stored in Postgres.
@@ -29,6 +31,40 @@ Interactive docs: `http://localhost:8000/docs`
 3. Open `http://localhost:8000/health` -> expect `database: ready`, `gemini: configured`, and `groq: configured` when everything is wired.
 
 Uploaded PDFs persist in the `uploads_data` Docker volume.
+
+## Deployment
+
+The backend is containerized via the included `Dockerfile` and runs on any
+platform that accepts a Docker web service (Render, Fly.io, Railway, Cloud Run,
+etc.). It expects a managed PostgreSQL with the `pgvector` extension enabled.
+
+The Streamlit frontend (`app.py`) is a standalone Python app and can be hosted
+on Streamlit Community Cloud, a second container service, or any Python host.
+It reads the backend URL from the `VERITAS_API_URL` environment variable (or
+`st.secrets["VERITAS_API_URL"]` on Streamlit Cloud), falling back to
+`http://localhost:8000` for local development. A lean `requirements-frontend.txt`
+is provided so the frontend host doesn't need to install backend dependencies.
+
+A `render.yaml` Blueprint is included for users who want to deploy the backend
+on Render with a single click.
+
+## Streamlit chat UI
+
+A Streamlit frontend lives in `app.py`. It talks to the FastAPI server via HTTP and provides:
+
+- Sidebar PDF upload and a list of indexed documents (with delete).
+- ChatGPT-style chat with `st.chat_message` + `st.chat_input`.
+- Persistent conversation history via `st.session_state`.
+- Inline citation panels showing the passages used to ground each answer.
+- A live backend health badge and configurable API URL.
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Then open `http://localhost:8501`. Set `VERITAS_API_URL` (env var) or change the
+"API URL" field in the sidebar if the backend is not on `http://localhost:8000`.
 
 ## Local development (without Docker)
 
