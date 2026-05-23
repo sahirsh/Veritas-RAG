@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI):
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.db_ready = False
+    app.state.db_error = None
 
     if engine is not None and session_factory is not None:
         try:
@@ -66,8 +67,10 @@ async def lifespan(app: FastAPI):
                 result = await session.execute(text("SELECT 1"))
                 if result.scalar_one() == 1:
                     app.state.db_ready = True
-        except Exception:
+        except Exception as exc:
+            logger.exception("Database startup probe failed")
             app.state.db_ready = False
+            app.state.db_error = f"{type(exc).__name__}: {exc}"
 
     yield
 
@@ -150,6 +153,8 @@ def health() -> HealthResponse:
     else:
         overall = "degraded"
 
+    db_error = getattr(app.state, "db_error", None) if db_state != "ready" else None
+
     return HealthResponse(
         status=overall,
         version=APP_VERSION,
@@ -157,6 +162,7 @@ def health() -> HealthResponse:
         gemini=gemini_state,
         groq=groq_state,
         uploads_dir=str(getattr(app.state, "upload_dir", Path("uploads"))),
+        database_error=db_error,
     )
 
 

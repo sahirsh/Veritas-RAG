@@ -79,3 +79,4 @@ class HealthResponse(BaseModel):
     gemini: str
     groq: str
     uploads_dir: str
+    database_error: str | None = None
