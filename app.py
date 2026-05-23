@@ -222,8 +222,7 @@ class BackendError(Exception):
 
 
 def _api_url(path: str) -> str:
-    base = st.session_state.get("api_url", DEFAULT_API_URL).rstrip("/")
-    return f"{base}{path}"
+    return f"{DEFAULT_API_URL.rstrip('/')}{path}"
 
 
 def _extract_error(resp: requests.Response) -> str:
@@ -302,8 +301,7 @@ def query_rag(question: str, top_k: int = 5) -> dict[str, Any]:
         )
     except requests.ConnectionError as exc:
         raise BackendError(
-            "Cannot reach the backend. Make sure FastAPI is running on "
-            f"{st.session_state.get('api_url', DEFAULT_API_URL)}."
+            "Cannot reach the backend. Please try again shortly."
         ) from exc
     except requests.Timeout as exc:
         raise BackendError("The query timed out. Try a simpler question.") from exc
@@ -319,8 +317,6 @@ def query_rag(question: str, top_k: int = 5) -> dict[str, Any]:
 
 
 def _init_state() -> None:
-    if "api_url" not in st.session_state:
-        st.session_state.api_url = DEFAULT_API_URL
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "top_k" not in st.session_state:
@@ -362,12 +358,6 @@ def _render_sidebar() -> None:
         st.caption("Ground answers in your PDFs")
 
         st.divider()
-        st.subheader("Backend")
-        st.text_input(
-            "API URL",
-            key="api_url",
-            help="Base URL of the FastAPI server.",
-        )
         health = check_health()
         _render_health_badge(health)
 
