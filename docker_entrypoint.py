@@ -31,6 +31,10 @@ def _drop_to_appuser() -> None:
     pw = pwd.getpwnam("appuser")
     os.setgid(pw.pw_gid)
     os.setuid(pw.pw_uid)
+    
+    os.environ["HOME"] = pw.pw_dir
+    os.environ["USER"] = pw.pw_name
+    os.environ["LOGNAME"] = pw.pw_name
 
 
 def main() -> None:
