@@ -40,6 +40,8 @@ class DocumentUploadResponse(BaseModel):
     id: int
     filename: str
     upload_date: datetime
+    expires_at: datetime
+    user_token: str
     extracted_text_length: int
     extracted_text: str
     extracted_text_truncated: bool
@@ -52,6 +54,8 @@ class DocumentSummary(BaseModel):
     id: int
     filename: str
     upload_date: datetime
+    expires_at: datetime
+    user_token: str
     chunk_count: int
     embedded_chunk_count: int
 
@@ -67,6 +71,8 @@ class DocumentDetail(BaseModel):
     id: int
     filename: str
     upload_date: datetime
+    expires_at: datetime
+    user_token: str
     chunk_count: int
     embedded_chunk_count: int
     embedding_model: str | None

@@ -11,6 +11,8 @@ Override with the VERITAS_API_URL environment variable or the sidebar setting.
 from __future__ import annotations
 
 import os
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -214,6 +216,41 @@ def _inject_css() -> None:
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
+# ----------------------------- Session token ----------------------------- #
+
+
+def _get_or_create_user_token() -> str:
+    """
+    Assign a persistent UUID session token.
+
+    Priority:
+      1. URL query param  ?token=<uuid>  (survives page refresh)
+      2. st.session_state (in-memory, same tab)
+      3. Generate fresh UUID → write to both
+
+    Writing to st.query_params immediately updates the URL bar, so the token
+    survives F5 without any server-side storage.
+    """
+    param_token = st.query_params.get("token")
+    if param_token:
+        try:
+            uuid.UUID(param_token)
+            st.session_state["user_token"] = param_token
+            return param_token
+        except ValueError:
+            pass  # Ignore malformed tokens in URL; fall through to generate a new one.
+
+    session_token = st.session_state.get("user_token")
+    if session_token:
+        st.query_params["token"] = session_token
+        return session_token
+
+    new_token = str(uuid.uuid4())
+    st.session_state["user_token"] = new_token
+    st.query_params["token"] = new_token
+    return new_token
+
+
 # ----------------------------- API helpers ----------------------------- #
 
 
@@ -223,6 +260,10 @@ class BackendError(Exception):
 
 def _api_url(path: str) -> str:
     return f"{DEFAULT_API_URL.rstrip('/')}{path}"
+
+
+def _token_headers(token: str) -> dict[str, str]:
+    return {"X-User-Token": token}
 
 
 def _extract_error(resp: requests.Response) -> str:
@@ -250,12 +291,13 @@ def check_health() -> dict[str, Any] | None:
         return None
 
 
-def upload_pdf(file_name: str, file_bytes: bytes) -> dict[str, Any]:
+def upload_pdf(file_name: str, file_bytes: bytes, token: str) -> dict[str, Any]:
     files = {"file": (file_name, file_bytes, "application/pdf")}
     try:
         resp = requests.post(
             _api_url("/documents/upload"),
             files=files,
+            headers=_token_headers(token),
             timeout=REQUEST_TIMEOUT,
         )
     except requests.ConnectionError as exc:
@@ -272,9 +314,13 @@ def upload_pdf(file_name: str, file_bytes: bytes) -> dict[str, Any]:
     return resp.json()
 
 
-def list_documents() -> list[dict[str, Any]]:
+def list_documents(token: str) -> list[dict[str, Any]]:
     try:
-        resp = requests.get(_api_url("/documents"), timeout=10)
+        resp = requests.get(
+            _api_url("/documents"),
+            headers=_token_headers(token),
+            timeout=10,
+        )
         resp.raise_for_status()
         data = resp.json()
         return data.get("items", [])
@@ -282,21 +328,26 @@ def list_documents() -> list[dict[str, Any]]:
         return []
 
 
-def delete_document(doc_id: int) -> None:
+def delete_document(doc_id: int, token: str) -> None:
     try:
-        resp = requests.delete(_api_url(f"/documents/{doc_id}"), timeout=15)
+        resp = requests.delete(
+            _api_url(f"/documents/{doc_id}"),
+            headers=_token_headers(token),
+            timeout=15,
+        )
     except requests.RequestException as exc:
         raise BackendError(f"Could not delete document: {exc}") from exc
     if not resp.ok and resp.status_code != 204:
         raise BackendError(_extract_error(resp))
 
 
-def query_rag(question: str, top_k: int = 5) -> dict[str, Any]:
+def query_rag(question: str, top_k: int, token: str) -> dict[str, Any]:
     payload = {"question": question, "top_k": top_k}
     try:
         resp = requests.post(
             _api_url("/query"),
             json=payload,
+            headers=_token_headers(token),
             timeout=REQUEST_TIMEOUT,
         )
     except requests.ConnectionError as exc:
@@ -326,6 +377,33 @@ def _init_state() -> None:
 
 
 _init_state()
+
+# Resolve (or generate) the session token once per script run.
+_USER_TOKEN: str = _get_or_create_user_token()
+
+
+# ----------------------------- Helpers ----------------------------- #
+
+
+def _format_expires(expires_at_str: str | None) -> str:
+    """Return a human-readable 'Expires in Xh Ym' string, or empty string on failure."""
+    if not expires_at_str:
+        return ""
+    try:
+        exp = datetime.fromisoformat(expires_at_str)
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        delta = exp - datetime.now(timezone.utc)
+        total_seconds = int(delta.total_seconds())
+        if total_seconds <= 0:
+            return "Expired"
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes = remainder // 60
+        if hours > 0:
+            return f"Expires in {hours}h {minutes}m"
+        return f"Expires in {minutes}m"
+    except Exception:
+        return ""
 
 
 # ----------------------------- Sidebar ----------------------------- #
@@ -357,6 +435,14 @@ def _render_sidebar() -> None:
         st.markdown("# 📚 Veritas-RAG")
         st.caption("Ground answers in your PDFs")
 
+        # Session identity pill
+        short_token = _USER_TOKEN[:8]
+        st.markdown(
+            f"<small style='color:#555870;'>Session&nbsp;"
+            f"<code style='color:#6d6f84;'>{short_token}…</code></small>",
+            unsafe_allow_html=True,
+        )
+
         st.divider()
         health = check_health()
         _render_health_badge(health)
@@ -374,7 +460,7 @@ def _render_sidebar() -> None:
             if file_key not in st.session_state.uploaded_files:
                 with st.spinner(f"Uploading and indexing '{uploaded.name}'…"):
                     try:
-                        result = upload_pdf(uploaded.name, uploaded.getvalue())
+                        result = upload_pdf(uploaded.name, uploaded.getvalue(), _USER_TOKEN)
                     except BackendError as exc:
                         st.error(f"Upload failed: {exc}", icon="⚠️")
                     else:
@@ -388,23 +474,30 @@ def _render_sidebar() -> None:
 
         st.divider()
         st.subheader("Indexed documents")
-        docs = list_documents()
+        docs = list_documents(_USER_TOKEN)
         if not docs:
             st.caption("No documents yet. Upload a PDF to get started.")
         else:
             for doc in docs:
+                expiry_str = _format_expires(doc.get("expires_at"))
+                expiry_html = (
+                    f" · <span style='color:#555870;font-size:0.75em;'>{expiry_str}</span>"
+                    if expiry_str
+                    else ""
+                )
                 cols = st.columns([0.78, 0.22])
                 with cols[0]:
                     st.markdown(
                         f"**{doc['filename']}**  \n"
                         f"<small style='color:#8b8ea0;'>"
-                        f"{doc['chunk_count']} chunks · id {doc['id']}</small>",
+                        f"{doc['chunk_count']} chunks · id {doc['id']}"
+                        f"{expiry_html}</small>",
                         unsafe_allow_html=True,
                     )
                 with cols[1]:
                     if st.button("🗑", key=f"del_{doc['id']}", help="Delete"):
                         try:
-                            delete_document(doc["id"])
+                            delete_document(doc["id"], _USER_TOKEN)
                         except BackendError as exc:
                             st.error(str(exc))
                         else:
@@ -504,7 +597,7 @@ def _render_chat() -> None:
     with st.chat_message("assistant", avatar="🤖"):
         with st.spinner("Searching documents and generating answer…"):
             try:
-                result = query_rag(prompt, top_k=st.session_state.top_k)
+                result = query_rag(prompt, top_k=st.session_state.top_k, token=_USER_TOKEN)
             except BackendError as exc:
                 error_text = f"⚠️ {exc}"
                 st.error(error_text)

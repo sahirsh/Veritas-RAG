@@ -32,3 +32,5 @@ services:
      
       - key: CORS_ORIGINS
         value: "*"
+      - key: DOCUMENT_TTL_HOURS
+        value: "48"

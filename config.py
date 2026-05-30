@@ -6,6 +6,9 @@ import os
 
 APP_VERSION = "1.0.0"
 
+# How long uploaded documents live before being eligible for purge.
+DOCUMENT_TTL_HOURS: int = int(os.environ.get("DOCUMENT_TTL_HOURS", "48"))
+
 
 def database_configured() -> bool:
     return bool(os.environ.get("DATABASE_URL"))

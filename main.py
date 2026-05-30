@@ -1,11 +1,12 @@
 import asyncio
+import datetime as dt
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import FastAPI, File, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.exception_handlers import (
     http_exception_handler,
     request_validation_exception_handler,
@@ -19,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from config import (
     APP_VERSION,
+    DOCUMENT_TTL_HOURS,
     cors_origins,
     database_configured,
     gemini_configured,
@@ -49,6 +51,87 @@ MAX_CHUNKS_TO_EMBED = 200
 PDF_MAGIC = b"%PDF-"
 
 
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_user_token(x_user_token: str | None) -> str:
+    """
+    Validate and return the session token from the X-User-Token header.
+    Raises HTTP 400 if the header is missing or not a valid UUID.
+    """
+    if not x_user_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-User-Token header is required. Your session token was not sent.",
+        )
+    try:
+        uuid.UUID(x_user_token)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="X-User-Token must be a valid UUID.",
+        )
+    return x_user_token
+
+
+def _document_expires_at() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=DOCUMENT_TTL_HOURS)
+
+
+# ---------------------------------------------------------------------------
+# Expired-document purge
+# ---------------------------------------------------------------------------
+
+
+async def purge_expired_documents(factory, upload_dir: Path) -> int:
+    """
+    Delete all documents whose expires_at is in the past.
+
+    Returns the number of documents deleted. Fetches storage_path values
+    first so disk files can be removed after the DB rows are gone.
+    """
+    try:
+        async with factory() as session:
+            now = dt.datetime.now(dt.timezone.utc)
+            expired_rows = (
+                await session.execute(
+                    select(Document.id, Document.storage_path).where(
+                        Document.expires_at < now
+                    )
+                )
+            ).all()
+
+            if not expired_rows:
+                return 0
+
+            expired_ids = [r.id for r in expired_rows]
+            storage_paths = [r.storage_path for r in expired_rows]
+
+            await session.execute(
+                text("DELETE FROM documents WHERE id = ANY(:ids)").bindparams(
+                    ids=expired_ids
+                )
+            )
+            await session.commit()
+
+        for sp in storage_paths:
+            if sp:
+                delete_uploaded_file(upload_dir, sp)
+
+        logger.info("Purged %d expired document(s)", len(expired_ids))
+        return len(expired_ids)
+    except Exception:
+        logger.exception("Error purging expired documents")
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# App lifecycle
+# ---------------------------------------------------------------------------
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     upload_dir = Path(os.environ.get("UPLOAD_DIR", "uploads")).resolve()
@@ -71,6 +154,9 @@ async def lifespan(app: FastAPI):
             logger.exception("Database startup probe failed")
             app.state.db_ready = False
             app.state.db_error = f"{type(exc).__name__}: {exc}"
+
+        if app.state.db_ready:
+            await purge_expired_documents(session_factory, upload_dir)
 
     yield
 
@@ -122,6 +208,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
 @app.get("/")
 def read_root() -> dict[str, str]:
     return {
@@ -170,13 +261,23 @@ def health() -> HealthResponse:
 async def list_documents(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    x_user_token: str | None = Header(default=None),
 ) -> DocumentListResponse:
+    token = _extract_user_token(x_user_token)
     factory = _session_factory()
     _require_db_ready()
 
+    now = dt.datetime.now(dt.timezone.utc)
+
     async with factory() as session:
         total = int(
-            (await session.execute(select(func.count()).select_from(Document))).scalar_one()
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Document)
+                    .where(Document.user_token == token, Document.expires_at > now)
+                )
+            ).scalar_one()
         )
         stmt = (
             select(
@@ -184,6 +285,7 @@ async def list_documents(
                 func.count(DocumentChunk.id).label("chunk_count"),
             )
             .outerjoin(DocumentChunk, DocumentChunk.document_id == Document.id)
+            .where(Document.user_token == token, Document.expires_at > now)
             .group_by(Document.id)
             .order_by(Document.upload_date.desc())
             .limit(limit)
@@ -198,6 +300,8 @@ async def list_documents(
                 id=doc.id,
                 filename=doc.filename,
                 upload_date=doc.upload_date,
+                expires_at=doc.expires_at,
+                user_token=doc.user_token,
                 chunk_count=int(chunk_count),
                 embedded_chunk_count=int(chunk_count),
             )
@@ -207,7 +311,11 @@ async def list_documents(
 
 
 @app.get("/documents/{document_id}", response_model=DocumentDetail)
-async def get_document(document_id: int) -> DocumentDetail:
+async def get_document(
+    document_id: int,
+    x_user_token: str | None = Header(default=None),
+) -> DocumentDetail:
+    token = _extract_user_token(x_user_token)
     factory = _session_factory()
     _require_db_ready()
 
@@ -222,6 +330,17 @@ async def get_document(document_id: int) -> DocumentDetail:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Document {document_id} not found",
             )
+        if doc.user_token != token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this document.",
+            )
+        now = dt.datetime.now(dt.timezone.utc)
+        if doc.expires_at.replace(tzinfo=dt.timezone.utc) <= now:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document {document_id} has expired.",
+            )
         chunk_count = len(doc.chunks)
         embedding_model = doc.chunks[0].embedding_model if doc.chunks else None
 
@@ -229,6 +348,8 @@ async def get_document(document_id: int) -> DocumentDetail:
         id=doc.id,
         filename=doc.filename,
         upload_date=doc.upload_date,
+        expires_at=doc.expires_at,
+        user_token=doc.user_token,
         chunk_count=chunk_count,
         embedded_chunk_count=chunk_count,
         embedding_model=embedding_model,
@@ -236,7 +357,11 @@ async def get_document(document_id: int) -> DocumentDetail:
 
 
 @app.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_document(document_id: int) -> None:
+async def delete_document(
+    document_id: int,
+    x_user_token: str | None = Header(default=None),
+) -> None:
+    token = _extract_user_token(x_user_token)
     factory = _session_factory()
     _require_db_ready()
     upload_dir: Path = app.state.upload_dir
@@ -247,6 +372,11 @@ async def delete_document(document_id: int) -> None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Document {document_id} not found",
+            )
+        if doc.user_token != token:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this document.",
             )
         storage_path = doc.storage_path
         await session.delete(doc)
@@ -262,7 +392,10 @@ async def delete_document(document_id: int) -> None:
 )
 async def upload_document(
     file: UploadFile = File(..., description="PDF file to store"),
+    x_user_token: str | None = Header(default=None),
 ):
+    token = _extract_user_token(x_user_token)
+
     if file.content_type:
         ct = file.content_type.split(";")[0].strip().lower()
         if ct not in ("application/pdf", "application/x-pdf"):
@@ -368,10 +501,16 @@ async def upload_document(
         preview = raw_text[:MAX_EXTRACTED_TEXT_IN_RESPONSE]
         truncated = True
 
+    expires_at = _document_expires_at()
     db_name = orig[:255]
     try:
         async with factory() as session:
-            doc = Document(filename=db_name, storage_path=stored_name)
+            doc = Document(
+                filename=db_name,
+                storage_path=stored_name,
+                user_token=token,
+                expires_at=expires_at,
+            )
             session.add(doc)
             await session.flush()
             if emb is not None and emb.vectors:
@@ -402,10 +541,15 @@ async def upload_document(
             detail="Could not save the document. Please try again later.",
         )
 
+    # Best-effort cleanup of any expired documents now that we know DB is healthy.
+    asyncio.create_task(purge_expired_documents(factory, upload_dir))
+
     return DocumentUploadResponse(
         id=doc.id,
         filename=doc.filename,
         upload_date=doc.upload_date,
+        expires_at=doc.expires_at,
+        user_token=doc.user_token,
         extracted_text_length=text_len,
         extracted_text=preview,
         extracted_text_truncated=truncated,
@@ -416,7 +560,11 @@ async def upload_document(
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query_documents(request: QueryRequest) -> QueryResponse:
+async def query_documents(
+    request: QueryRequest,
+    x_user_token: str | None = Header(default=None),
+) -> QueryResponse:
+    token = _extract_user_token(x_user_token)
     factory = _session_factory()
     _require_db_ready()
 
@@ -460,12 +608,18 @@ async def query_documents(request: QueryRequest) -> QueryResponse:
         )
 
     query_vec = emb.vectors[0]
+    now = dt.datetime.now(dt.timezone.utc)
 
     async with factory() as session:
         if doc_ids is not None:
+            # Validate that every requested ID exists AND belongs to this token.
             existing = (
                 await session.execute(
-                    select(Document.id).where(Document.id.in_(doc_ids))
+                    select(Document.id).where(
+                        Document.id.in_(doc_ids),
+                        Document.user_token == token,
+                        Document.expires_at > now,
+                    )
                 )
             ).scalars().all()
             missing = sorted(set(doc_ids) - set(existing))
@@ -485,6 +639,7 @@ async def query_documents(request: QueryRequest) -> QueryResponse:
                 DocumentChunk.embedding.cosine_distance(query_vec).label("cosine_distance"),
             )
             .join(Document, Document.id == DocumentChunk.document_id)
+            .where(Document.user_token == token, Document.expires_at > now)
             .order_by(text("cosine_distance ASC"))
             .limit(request.top_k)
         )
