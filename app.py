@@ -220,17 +220,70 @@ def _inject_css() -> None:
 # ----------------------------- Session token ----------------------------- #
 
 COOKIE_NAME = "veritas_user_token"
+QUERY_PARAM = "token"
 COOKIE_DAYS = 365
+MAX_COOKIE_READ_ATTEMPTS = 4
 
 
 def _cookie_secure() -> bool:
     """Use Secure cookies on HTTPS (Render); allow HTTP for local dev."""
+    try:
+        if st.context.headers.get("X-Forwarded-Proto") == "https":
+            return True
+    except Exception:
+        pass
     return os.environ.get("VERITAS_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
 
 
-@st.cache_resource
-def _cookie_manager() -> stx.CookieManager:
-    return stx.CookieManager(key="veritas_cookie_manager")
+def _valid_token(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except ValueError:
+        return None
+
+
+def _get_cookie_manager() -> stx.CookieManager:
+    # One manager per Streamlit session — do NOT cache globally with @st.cache_resource.
+    if "cookie_manager" not in st.session_state:
+        st.session_state.cookie_manager = stx.CookieManager(key="veritas_cookie_manager")
+    return st.session_state.cookie_manager
+
+
+def _sync_token_to_url(token: str) -> None:
+    if st.session_state.get("_token_synced_to_url") == token:
+        return
+    st.query_params[QUERY_PARAM] = token
+    st.session_state["_token_synced_to_url"] = token
+
+
+def _write_user_cookie(cookie_manager: stx.CookieManager, token: str) -> None:
+    if st.session_state.get("_cookie_token_written") == token:
+        return
+    expires = datetime.now(timezone.utc) + timedelta(days=COOKIE_DAYS)
+    cookie_manager.set(
+        COOKIE_NAME,
+        token,
+        expires_at=expires,
+        path="/",
+        same_site="lax",
+        secure=_cookie_secure(),
+        key="set_veritas_token",
+    )
+    st.session_state["_cookie_token_written"] = token
+
+
+def _read_token_from_request() -> str | None:
+    """Read a token already present in the URL or request cookies."""
+    token = _valid_token(st.query_params.get(QUERY_PARAM))
+    if token:
+        return token
+
+    try:
+        return _valid_token(st.context.cookies.get(COOKIE_NAME))
+    except Exception:
+        return None
 
 
 def _get_or_create_user_token() -> str:
@@ -238,36 +291,42 @@ def _get_or_create_user_token() -> str:
     if "user_token" in st.session_state:
         return st.session_state["user_token"]
 
-    cookie_manager = _cookie_manager()
-    cookies = cookie_manager.get_all()
+    cookie_manager = _get_cookie_manager()
 
+    request_token = _read_token_from_request()
+    if request_token:
+        _write_user_cookie(cookie_manager, request_token)
+        st.session_state["user_token"] = request_token
+        _sync_token_to_url(request_token)
+        return request_token
+
+    cookies = cookie_manager.get_all()
     if cookies is None:
         st.stop()
 
-    session_token = cookies.get(COOKIE_NAME)
-    if session_token:
-        try:
-            uuid.UUID(session_token)
-            st.session_state["user_token"] = session_token
-            return session_token
-        except ValueError:
-            pass
+    cookie_token = _valid_token(cookies.get(COOKIE_NAME))
+    if cookie_token:
+        st.session_state["user_token"] = cookie_token
+        _sync_token_to_url(cookie_token)
+        return cookie_token
 
-    session_token = str(uuid.uuid4())
-    expires = datetime.now(timezone.utc) + timedelta(days=COOKIE_DAYS)
+    attempts = int(st.session_state.get("_cookie_read_attempts", 0))
+    if not cookies and attempts < MAX_COOKIE_READ_ATTEMPTS:
+        st.session_state["_cookie_read_attempts"] = attempts + 1
+        st.stop()
 
-    cookie_manager.set(
-        COOKIE_NAME,
-        session_token,
-        expires_at=expires,
-        path="/",
-        same_site="lax",
-        secure=_cookie_secure(),
-        key="set_veritas_token",
-    )
-    st.session_state["user_token"] = session_token
-    st.rerun()
-    return session_token
+    if "pending_user_token" not in st.session_state:
+        st.session_state["pending_user_token"] = str(uuid.uuid4())
+
+    pending = st.session_state["pending_user_token"]
+
+    if st.session_state.get("_cookie_token_written") != pending:
+        _write_user_cookie(cookie_manager, pending)
+        st.rerun()
+
+    st.session_state["user_token"] = pending
+    _sync_token_to_url(pending)
+    return pending
 
 
 # ----------------------------- API helpers ----------------------------- #
