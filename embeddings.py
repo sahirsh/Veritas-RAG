@@ -9,8 +9,17 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+from config import LOCAL_EMBEDDING_MODEL, USE_LOCAL_MODELS
+
 logger = logging.getLogger(__name__)
 client: genai.Client | None = None
+
+# Lazily-loaded SentenceTransformer instance (loading is slow, so we cache it).
+_local_model: Any = None
+
+# bge-small-en-v1.5 recommends prefixing short retrieval *queries* with this
+# instruction; passages are embedded with no prefix.
+_BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
 
 @dataclass(frozen=True)
@@ -159,6 +168,78 @@ def _embed_batch_sync(batch: list[str], model: str, task_type: str) -> list[list
     if len(vectors) != len(batch):
         raise EmbeddingError("The embedding service returned a mismatched batch size.")
     return vectors
+
+
+def _get_local_model() -> Any:
+    global _local_model
+    if _local_model is None:
+        try:
+            # Imported lazily so the (heavy) dependency is only needed in local mode.
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise EmbeddingError(
+                "Local embeddings require the 'sentence-transformers' package, "
+                "which is not installed on this server."
+            ) from exc
+        try:
+            _local_model = SentenceTransformer(LOCAL_EMBEDDING_MODEL)
+        except Exception as exc:
+            logger.exception("Failed to load local embedding model")
+            raise EmbeddingError(
+                f"Could not load local embedding model '{LOCAL_EMBEDDING_MODEL}'."
+            ) from exc
+    return _local_model
+
+
+async def embed_texts_local(
+    texts: list[str],
+    *,
+    task_type: str = "RETRIEVAL_DOCUMENT",
+) -> EmbeddingResult:
+    """
+    Create embeddings using a local sentence-transformers model (e.g. bge-small).
+
+    Returns the same EmbeddingResult shape as the Gemini path so callers are
+    provider-agnostic. `texts` keeps the original (unprefixed) content; only the
+    encoder input is prefixed for retrieval queries.
+    """
+    cleaned = [t.strip() for t in texts if t and t.strip()]
+    if not cleaned:
+        return EmbeddingResult(model=LOCAL_EMBEDDING_MODEL, texts=[], vectors=[])
+
+    if task_type == "RETRIEVAL_QUERY":
+        encoder_inputs = [_BGE_QUERY_INSTRUCTION + t for t in cleaned]
+    else:
+        encoder_inputs = cleaned
+
+    def _encode() -> list[list[float]]:
+        model = _get_local_model()
+        # normalize so cosine distance in pgvector behaves as expected for bge.
+        arr = model.encode(encoder_inputs, normalize_embeddings=True)
+        return [[float(x) for x in row] for row in arr]
+
+    try:
+        vectors = await asyncio.to_thread(_encode)
+    except EmbeddingError:
+        raise
+    except Exception as exc:
+        logger.exception("Local embedding request failed")
+        raise EmbeddingError(
+            "The local embedding model failed to encode the input."
+        ) from exc
+
+    return EmbeddingResult(model=LOCAL_EMBEDDING_MODEL, texts=cleaned, vectors=vectors)
+
+
+async def embed_texts(
+    texts: list[str],
+    *,
+    task_type: str = "RETRIEVAL_DOCUMENT",
+) -> EmbeddingResult:
+    """Dispatch to the local model or Gemini based on USE_LOCAL_MODELS."""
+    if USE_LOCAL_MODELS:
+        return await embed_texts_local(texts, task_type=task_type)
+    return await embed_texts_gemini(texts, task_type=task_type)
 
 
 

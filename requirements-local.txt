@@ -1,0 +1,5 @@
+# Heavy dependencies only needed when USE_LOCAL_MODELS=true (local benchmarking).
+# Kept OUT of requirements.txt so the production/Render image stays small and
+# does not pull in PyTorch. Installed in the Docker image only when the
+# INSTALL_LOCAL_MODELS build arg is set to "true" (see Dockerfile / docker-compose).
+sentence-transformers

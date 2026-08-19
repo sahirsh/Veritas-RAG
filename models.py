@@ -6,10 +6,13 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from config import EMBEDDING_DIM
 from database import Base
 
-# Gemini text-embedding-004 default output size
-EMBEDDING_DIM = 768
+# EMBEDDING_DIM is sourced from config so it tracks the active embedding model
+# (768 for Gemini, 384 for the local bge-small model). Re-exported here because
+# the chunk-table migration imports it from this module.
+__all__ = ["EMBEDDING_DIM", "Document", "DocumentChunk"]
 
 
 class Document(Base):

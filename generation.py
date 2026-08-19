@@ -7,6 +7,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from config import LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL, USE_LOCAL_MODELS
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +52,27 @@ class GenerationResult:
     citation_passage_numbers: list[int]
 
 
+# Groq accepts the loose {"type": "json_object"} mode. LM Studio (OpenAI-compatible)
+# rejects it and requires a concrete schema, so local mode uses json_schema, which
+# constrains decoding to exactly this shape (answer string + integer citations).
+_ANSWER_JSON_SCHEMA = {
+    "name": "rag_answer",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "citations": {
+                "type": "array",
+                "items": {"type": "integer"},
+            },
+        },
+        "required": ["answer", "citations"],
+        "additionalProperties": False,
+    },
+}
+
+
 def _groq_error_message(exc: BaseException | None) -> str:
     if exc is None:
         return "The AI service is temporarily unavailable. Please try again later."
@@ -80,18 +103,28 @@ async def generate_answer_groq(
 
     Returns the resolved model name and answer text.
     """
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise GenerationError("Groq chat service is not configured on this server.")
-
-    resolved_model = model or os.environ.get("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
-
     if max_retries < 0:
         raise ValueError("max_retries must be >= 0")
 
-    from groq import AsyncGroq
+    if USE_LOCAL_MODELS:
+        from openai import AsyncOpenAI
 
-    client = AsyncGroq(api_key=api_key)
+        client = AsyncOpenAI(base_url=LOCAL_LLM_BASE_URL, api_key="not-needed")
+        resolved_model = model or LOCAL_LLM_MODEL
+        response_format: dict[str, Any] = {
+            "type": "json_schema",
+            "json_schema": _ANSWER_JSON_SCHEMA,
+        }
+    else:
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise GenerationError("Groq chat service is not configured on this server.")
+
+        from groq import AsyncGroq
+
+        client = AsyncGroq(api_key=api_key)
+        resolved_model = model or os.environ.get("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
+        response_format = {"type": "json_object"}
 
     parts = ["### Provided text\n"]
     for i, chunk in enumerate(context_chunks, start=1):
@@ -110,7 +143,7 @@ async def generate_answer_groq(
                     {"role": "user", "content": user_message},
                 ],
                 temperature=0.3,
-                response_format={"type": "json_object"},
+                response_format=response_format,
             )
             choice = resp.choices[0] if resp.choices else None
             content = getattr(choice.message, "content", None) if choice else None

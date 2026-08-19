@@ -67,6 +67,11 @@ class DocumentListResponse(BaseModel):
     offset: int
 
 
+class DocumentRenewResponse(BaseModel):
+    renewed_count: int
+    expires_at: datetime
+
+
 class DocumentDetail(BaseModel):
     id: int
     filename: str

@@ -14,7 +14,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 
@@ -27,13 +27,14 @@ from config import (
     groq_configured,
 )
 from database import create_engine_and_sessionmaker, dispose_engine
-from embeddings import EmbeddingError, EmbeddingResult, embed_texts_gemini
+from embeddings import EmbeddingError, EmbeddingResult, embed_texts
 from generation import GenerationError, generate_answer_groq
 from models import Document, DocumentChunk
 from pdf_text import PdfExtractError, chunk_text, extract_text_from_pdf
 from schemas import (
     DocumentDetail,
     DocumentListResponse,
+    DocumentRenewResponse,
     DocumentSummary,
     DocumentUploadResponse,
     HealthResponse,
@@ -293,7 +294,7 @@ async def list_documents(
         )
         rows = (await session.execute(stmt)).all()
 
-    items: list[DocumentSummary] = []
+    items = []
     for doc, chunk_count in rows:
         items.append(
             DocumentSummary(
@@ -308,6 +309,30 @@ async def list_documents(
         )
 
     return DocumentListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@app.post("/documents/renew", response_model=DocumentRenewResponse)
+async def renew_documents(
+    x_user_token: str | None = Header(default=None),
+) -> DocumentRenewResponse:
+    """Extend expires_at for all non-expired documents owned by this user."""
+    token = _extract_user_token(x_user_token)
+    factory = _session_factory()
+    _require_db_ready()
+
+    now = dt.datetime.now(dt.timezone.utc)
+    new_expires = _document_expires_at()
+
+    async with factory() as session:
+        result = await session.execute(
+            update(Document)
+            .where(Document.user_token == token, Document.expires_at > now)
+            .values(expires_at=new_expires)
+        )
+        await session.commit()
+        renewed_count = int(result.rowcount or 0)
+
+    return DocumentRenewResponse(renewed_count=renewed_count, expires_at=new_expires)
 
 
 @app.get("/documents/{document_id}", response_model=DocumentDetail)
@@ -483,7 +508,7 @@ async def upload_document(
                 detail=f"Document too large to embed safely ({len(chunks)} chunks > {MAX_CHUNKS_TO_EMBED}).",
             )
         try:
-            emb = await embed_texts_gemini(chunks, task_type="RETRIEVAL_DOCUMENT")
+            emb = await embed_texts(chunks, task_type="RETRIEVAL_DOCUMENT")
             embedded_chunk_count = len(emb.vectors)
             embedding_model = emb.model
         except EmbeddingError as exc:
@@ -594,7 +619,7 @@ async def query_documents(
             )
 
     try:
-        emb = await embed_texts_gemini([q], task_type="RETRIEVAL_QUERY")
+        emb = await embed_texts([q], task_type="RETRIEVAL_QUERY")
     except EmbeddingError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

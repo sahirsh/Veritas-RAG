@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import requests
 import streamlit as st
+import extra_streamlit_components as stx
 
 
 def _resolve_default_api_url() -> str:
@@ -218,37 +219,55 @@ def _inject_css() -> None:
 
 # ----------------------------- Session token ----------------------------- #
 
+COOKIE_NAME = "veritas_user_token"
+COOKIE_DAYS = 365
+
+
+def _cookie_secure() -> bool:
+    """Use Secure cookies on HTTPS (Render); allow HTTP for local dev."""
+    return os.environ.get("VERITAS_COOKIE_SECURE", "").lower() in ("1", "true", "yes")
+
+
+@st.cache_resource
+def _cookie_manager() -> stx.CookieManager:
+    return stx.CookieManager(key="veritas_cookie_manager")
+
 
 def _get_or_create_user_token() -> str:
-    """
-    Assign a persistent UUID session token.
+    """Return a stable per-browser UUID stored in a cookie."""
+    if "user_token" in st.session_state:
+        return st.session_state["user_token"]
 
-    Priority:
-      1. URL query param  ?token=<uuid>  (survives page refresh)
-      2. st.session_state (in-memory, same tab)
-      3. Generate fresh UUID → write to both
+    cookie_manager = _cookie_manager()
+    cookies = cookie_manager.get_all()
 
-    Writing to st.query_params immediately updates the URL bar, so the token
-    survives F5 without any server-side storage.
-    """
-    param_token = st.query_params.get("token")
-    if param_token:
-        try:
-            uuid.UUID(param_token)
-            st.session_state["user_token"] = param_token
-            return param_token
-        except ValueError:
-            pass  # Ignore malformed tokens in URL; fall through to generate a new one.
+    if cookies is None:
+        st.stop()
 
-    session_token = st.session_state.get("user_token")
+    session_token = cookies.get(COOKIE_NAME)
     if session_token:
-        st.query_params["token"] = session_token
-        return session_token
+        try:
+            uuid.UUID(session_token)
+            st.session_state["user_token"] = session_token
+            return session_token
+        except ValueError:
+            pass
 
-    new_token = str(uuid.uuid4())
-    st.session_state["user_token"] = new_token
-    st.query_params["token"] = new_token
-    return new_token
+    session_token = str(uuid.uuid4())
+    expires = datetime.now(timezone.utc) + timedelta(days=COOKIE_DAYS)
+
+    cookie_manager.set(
+        COOKIE_NAME,
+        session_token,
+        expires_at=expires,
+        path="/",
+        same_site="lax",
+        secure=_cookie_secure(),
+        key="set_veritas_token",
+    )
+    st.session_state["user_token"] = session_token
+    st.rerun()
+    return session_token
 
 
 # ----------------------------- API helpers ----------------------------- #
@@ -328,6 +347,25 @@ def list_documents(token: str) -> list[dict[str, Any]]:
         return []
 
 
+def renew_documents(token: str) -> None:
+    """Best-effort TTL extension for this user's active documents."""
+    try:
+        requests.post(
+            _api_url("/documents/renew"),
+            headers=_token_headers(token),
+            timeout=10,
+        )
+    except requests.RequestException:
+        pass
+
+
+def _maybe_renew_document_ttl(token: str) -> None:
+    if st.session_state.get("ttl_renewed"):
+        return
+    renew_documents(token)
+    st.session_state["ttl_renewed"] = True
+
+
 def delete_document(doc_id: int, token: str) -> None:
     try:
         resp = requests.delete(
@@ -380,6 +418,7 @@ _init_state()
 
 # Resolve (or generate) the session token once per script run.
 _USER_TOKEN: str = _get_or_create_user_token()
+_maybe_renew_document_ttl(_USER_TOKEN)
 
 
 # ----------------------------- Helpers ----------------------------- #
