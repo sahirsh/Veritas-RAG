@@ -220,7 +220,7 @@ def _inject_css() -> None:
 # ----------------------------- Session token ----------------------------- #
 
 COOKIE_NAME = "veritas_user_token"
-QUERY_PARAM = "token"
+TOKEN_QUERY_PARAM = "token"  # stripped if present; never used for auth
 COOKIE_DAYS = 365
 MAX_COOKIE_READ_ATTEMPTS = 4
 
@@ -251,11 +251,11 @@ def _get_cookie_manager() -> stx.CookieManager:
     return st.session_state.cookie_manager
 
 
-def _sync_token_to_url(token: str) -> None:
-    if st.session_state.get("_token_synced_to_url") == token:
-        return
-    st.query_params[QUERY_PARAM] = token
-    st.session_state["_token_synced_to_url"] = token
+def _strip_token_from_url() -> None:
+    """Drop ?token= from shared links so URLs are not credentials."""
+    if TOKEN_QUERY_PARAM in st.query_params:
+        del st.query_params[TOKEN_QUERY_PARAM]
+        st.rerun()
 
 
 def _write_user_cookie(cookie_manager: stx.CookieManager, token: str) -> None:
@@ -274,31 +274,14 @@ def _write_user_cookie(cookie_manager: stx.CookieManager, token: str) -> None:
     st.session_state["_cookie_token_written"] = token
 
 
-def _read_token_from_request() -> str | None:
-    """Read a token already present in the URL or request cookies."""
-    token = _valid_token(st.query_params.get(QUERY_PARAM))
-    if token:
-        return token
-
-    try:
-        return _valid_token(st.context.cookies.get(COOKIE_NAME))
-    except Exception:
-        return None
-
-
 def _get_or_create_user_token() -> str:
     """Return a stable per-browser UUID stored in a cookie."""
     if "user_token" in st.session_state:
         return st.session_state["user_token"]
 
-    cookie_manager = _get_cookie_manager()
+    _strip_token_from_url()
 
-    request_token = _read_token_from_request()
-    if request_token:
-        _write_user_cookie(cookie_manager, request_token)
-        st.session_state["user_token"] = request_token
-        _sync_token_to_url(request_token)
-        return request_token
+    cookie_manager = _get_cookie_manager()
 
     cookies = cookie_manager.get_all()
     if cookies is None:
@@ -307,7 +290,6 @@ def _get_or_create_user_token() -> str:
     cookie_token = _valid_token(cookies.get(COOKIE_NAME))
     if cookie_token:
         st.session_state["user_token"] = cookie_token
-        _sync_token_to_url(cookie_token)
         return cookie_token
 
     attempts = int(st.session_state.get("_cookie_read_attempts", 0))
@@ -325,7 +307,6 @@ def _get_or_create_user_token() -> str:
         st.rerun()
 
     st.session_state["user_token"] = pending
-    _sync_token_to_url(pending)
     return pending
 
 
