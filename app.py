@@ -11,6 +11,7 @@ Override with the VERITAS_API_URL environment variable or the sidebar setting.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -38,6 +39,11 @@ def _resolve_default_api_url() -> str:
 
 DEFAULT_API_URL = _resolve_default_api_url()
 REQUEST_TIMEOUT = 120  # seconds — embedding + generation can take a while
+# Render free tier can take 30–90s to cold-start; retry /health before giving up.
+BACKEND_WAKE_MAX_ATTEMPTS = 12
+BACKEND_WAKE_REQUEST_TIMEOUT = 25  # seconds per ping
+BACKEND_WAKE_RETRY_DELAY = 4  # seconds between pings
+BACKEND_HEALTH_TIMEOUT = 5  # seconds for routine sidebar checks
 
 st.set_page_config(
     page_title="Veritas-RAG",
@@ -340,14 +346,51 @@ def _extract_error(resp: requests.Response) -> str:
     return f"HTTP {resp.status_code}"
 
 
-def check_health() -> dict[str, Any] | None:
+def check_health(timeout: float = BACKEND_HEALTH_TIMEOUT) -> dict[str, Any] | None:
     """Return health payload, or None if the backend is unreachable."""
     try:
-        resp = requests.get(_api_url("/health"), timeout=5)
+        resp = requests.get(_api_url("/health"), timeout=timeout)
         resp.raise_for_status()
         return resp.json()
     except requests.RequestException:
         return None
+
+
+def wake_backend() -> dict[str, Any] | None:
+    """Ping /health repeatedly until the API responds (cold-start wake)."""
+    for attempt in range(1, BACKEND_WAKE_MAX_ATTEMPTS + 1):
+        health = check_health(timeout=BACKEND_WAKE_REQUEST_TIMEOUT)
+        if health is not None:
+            return health
+        if attempt < BACKEND_WAKE_MAX_ATTEMPTS:
+            time.sleep(BACKEND_WAKE_RETRY_DELAY)
+    return None
+
+
+def _ensure_backend_health() -> dict[str, Any] | None:
+    """
+    On first load per session, run an extended wake sequence for sleeping hosts.
+    Later reruns use a quick health check only.
+    """
+    if st.session_state.get("backend_awake"):
+        return check_health()
+
+    if not st.session_state.get("backend_wake_attempted"):
+        with st.status("Waking up backend…", expanded=True) as status:
+            st.caption(
+                "The API may be sleeping (Render free tier). "
+                "This can take up to a minute."
+            )
+            health = wake_backend()
+            st.session_state.backend_wake_attempted = True
+            if health is not None:
+                st.session_state.backend_awake = True
+                status.update(label="Backend online", state="complete", expanded=False)
+                return health
+            status.update(label="Backend unreachable", state="error", expanded=True)
+            return None
+
+    return check_health()
 
 
 def upload_pdf(file_name: str, file_bytes: bytes, token: str) -> dict[str, Any]:
@@ -452,6 +495,10 @@ def _init_state() -> None:
         st.session_state.top_k = 5
     if "uploaded_files" not in st.session_state:
         st.session_state.uploaded_files = set()
+    if "backend_wake_attempted" not in st.session_state:
+        st.session_state.backend_wake_attempted = False
+    if "backend_awake" not in st.session_state:
+        st.session_state.backend_awake = False
 
 
 _init_state()
@@ -491,6 +538,10 @@ def _format_expires(expires_at_str: str | None) -> str:
 def _render_health_badge(health: dict[str, Any] | None) -> None:
     if health is None:
         st.error("Backend offline", icon="🔴")
+        if st.button("Retry wake-up", key="retry_backend_wake", use_container_width=True):
+            st.session_state.backend_wake_attempted = False
+            st.session_state.backend_awake = False
+            st.rerun()
         return
 
     status = health.get("status", "unknown")
@@ -523,7 +574,7 @@ def _render_sidebar() -> None:
         )
 
         st.divider()
-        health = check_health()
+        health = _ensure_backend_health()
         _render_health_badge(health)
 
         st.divider()
@@ -609,7 +660,7 @@ def _render_hero() -> None:
         """
         <div class="veritas-hero">
             <h1>📚 Veritas-RAG</h1>
-            <p>Ask questions grounded in your indexed PDFs · powered by Gemini embeddings &amp; Groq llama-3.1-8b-instant</p>
+            <p>Ask questions grounded in your indexed PDFs · powered by Gemini embeddings &amp; Groq Opeenai gpt-oss-20b</p>
         </div>
         """,
         unsafe_allow_html=True,

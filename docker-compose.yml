@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        INSTALL_LOCAL_MODELS: "true"
+        INSTALL_LOCAL_MODELS: "false"
     ports:
       - "8000:8000"
     env_file:
@@ -13,7 +13,7 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_EMBEDDING_MODEL: ${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-llama-3.1-8b-instant}
+      GROQ_CHAT_MODEL: ${GROQ_CHAT_MODEL:-openai/gpt-oss-20b}
       UPLOAD_DIR: /app/uploads
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
     volumes:

@@ -222,7 +222,7 @@ def read_root() -> dict[str, str]:
         "docs": "/docs",
     }
 
-
+@app.head("/health")
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """
