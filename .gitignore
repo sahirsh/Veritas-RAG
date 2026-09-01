@@ -15,6 +15,4 @@ htmlcov/
 .ruff_cache/
 .cursor/
 .cursor-backup/
-tests/eval/pdf_paths.json
-tests/eval/results.json
-tests/eval/fixtures/*.pdf
+tests/eval/
