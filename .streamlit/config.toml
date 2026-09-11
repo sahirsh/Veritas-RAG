@@ -11,3 +11,6 @@ gatherUsageStats = false
 
 [server]
 headless = true
+# Behind Cloud Run / reverse proxies; also set via Dockerfile.frontend ENV.
+enableCORS = false
+enableXsrfProtection = false

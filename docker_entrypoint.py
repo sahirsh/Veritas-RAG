@@ -23,15 +23,20 @@ def _ensure_upload_dir_writable() -> None:
             for name in filenames:
                 path = os.path.join(root, name)
                 os.chown(path, pw.pw_uid, pw.pw_gid)
-    except (KeyError, OSError) as exc:
+    except (KeyError, OSError, PermissionError) as exc:
         print(f"Warning: could not chown {upload_dir}: {exc}", flush=True)
 
 
 def _drop_to_appuser() -> None:
+    """Drop root privileges when possible (local Docker). Skip on Cloud Run non-root."""
+    if os.geteuid() != 0:
+        print("Already running as non-root; skipping privilege drop.", flush=True)
+        return
+
     pw = pwd.getpwnam("appuser")
     os.setgid(pw.pw_gid)
     os.setuid(pw.pw_uid)
-    
+
     os.environ["HOME"] = pw.pw_dir
     os.environ["USER"] = pw.pw_name
     os.environ["LOGNAME"] = pw.pw_name
@@ -42,13 +47,19 @@ def main() -> None:
 
     if os.environ.get("DATABASE_URL"):
         print("Running database migrations...", flush=True)
-        subprocess.check_call([sys.executable, "-m", "alembic", "upgrade", "head"])
+        try:
+            subprocess.check_call([sys.executable, "-m", "alembic", "upgrade", "head"])
+        except subprocess.CalledProcessError as exc:
+            # Still start the API so Cloud Run can bind PORT; /health will show DB issues.
+            print(f"Warning: migrations failed (exit {exc.returncode}); starting API anyway.", flush=True)
     else:
         print("DATABASE_URL is not set; skipping migrations.", flush=True)
 
     _drop_to_appuser()
 
-    port = os.environ.get("PORT", "8000")
+    # Cloud Run injects PORT (typically 8080). Do not hardcode 8000 in Cloud Run env.
+    port = os.environ.get("PORT", "8080")
+    print(f"Starting uvicorn on 0.0.0.0:{port}", flush=True)
     os.execvp(
         "uvicorn",
         ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", port],

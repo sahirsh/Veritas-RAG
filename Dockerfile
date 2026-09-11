@@ -28,7 +28,9 @@ RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \
 
 COPY . .
 
-# Entrypoint starts as root to chown the uploads volume, then drops to appuser.
-EXPOSE 8000
+# Entrypoint starts as root (local Docker) to chown uploads, then drops to appuser.
+# On Cloud Run the process may already be non-root; entrypoint handles both.
+# Cloud Run sets PORT (usually 8080); listen on that value.
+EXPOSE 8080
 
 ENTRYPOINT ["python", "/app/docker_entrypoint.py"]
