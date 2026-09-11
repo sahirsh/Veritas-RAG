@@ -228,11 +228,11 @@ def _inject_css() -> None:
 COOKIE_NAME = "veritas_user_token"
 TOKEN_QUERY_PARAM = "token"  # stripped if present; never used for auth
 COOKIE_DAYS = 365
-MAX_COOKIE_READ_ATTEMPTS = 4
+MAX_COOKIE_WRITE_ATTEMPTS = 8
 
 
 def _cookie_secure() -> bool:
-    """Use Secure cookies on HTTPS (Render); allow HTTP for local dev."""
+    """Use Secure cookies on HTTPS; allow HTTP for local dev."""
     try:
         if st.context.headers.get("X-Forwarded-Proto") == "https":
             return True
@@ -265,8 +265,6 @@ def _strip_token_from_url() -> None:
 
 
 def _write_user_cookie(cookie_manager: stx.CookieManager, token: str) -> None:
-    if st.session_state.get("_cookie_token_written") == token:
-        return
     expires = datetime.now(timezone.utc) + timedelta(days=COOKIE_DAYS)
     cookie_manager.set(
         COOKIE_NAME,
@@ -275,45 +273,59 @@ def _write_user_cookie(cookie_manager: stx.CookieManager, token: str) -> None:
         path="/",
         same_site="lax",
         secure=_cookie_secure(),
-        key="set_veritas_token",
+        key=f"set_veritas_token_{st.session_state.get('_cookie_write_attempts', 0)}",
     )
-    st.session_state["_cookie_token_written"] = token
+
+
+def _read_cookie_token(cookie_manager: stx.CookieManager) -> str | None:
+    """Prefer native request cookies; fall back to CookieManager when ready."""
+    try:
+        native = _valid_token(st.context.cookies.get(COOKIE_NAME))
+        if native:
+            return native
+    except Exception:
+        pass
+
+    cookies = cookie_manager.get_all()
+    if not isinstance(cookies, dict):
+        return None
+    return _valid_token(cookies.get(COOKIE_NAME))
 
 
 def _get_or_create_user_token() -> str:
-    """Return a stable per-browser UUID stored in a cookie."""
-    if "user_token" in st.session_state:
-        return st.session_state["user_token"]
+    """
+    Return a stable per-browser UUID.
 
+    CookieManager is best-effort: the UI always proceeds with a session token.
+    When the cookie component succeeds (or st.context sees the cookie), we adopt
+    that value and stop rewriting. Never call st.stop() — that blanks Cloud Run.
+    """
     _strip_token_from_url()
 
     cookie_manager = _get_cookie_manager()
+    cookie_token = _read_cookie_token(cookie_manager)
 
-    cookies = cookie_manager.get_all()
-    if cookies is None:
-        st.stop()
-
-    cookie_token = _valid_token(cookies.get(COOKIE_NAME))
     if cookie_token:
         st.session_state["user_token"] = cookie_token
+        st.session_state["_cookie_confirmed"] = True
         return cookie_token
 
-    attempts = int(st.session_state.get("_cookie_read_attempts", 0))
-    if not cookies and attempts < MAX_COOKIE_READ_ATTEMPTS:
-        st.session_state["_cookie_read_attempts"] = attempts + 1
-        st.stop()
+    if "user_token" not in st.session_state:
+        st.session_state["user_token"] = str(uuid.uuid4())
 
-    if "pending_user_token" not in st.session_state:
-        st.session_state["pending_user_token"] = str(uuid.uuid4())
+    token = st.session_state["user_token"]
 
-    pending = st.session_state["pending_user_token"]
+    # Keep trying to persist until CookieManager confirms (Cloud Run can lag).
+    if not st.session_state.get("_cookie_confirmed"):
+        attempts = int(st.session_state.get("_cookie_write_attempts", 0))
+        if attempts < MAX_COOKIE_WRITE_ATTEMPTS:
+            st.session_state["_cookie_write_attempts"] = attempts + 1
+            try:
+                _write_user_cookie(cookie_manager, token)
+            except Exception:
+                pass
 
-    if st.session_state.get("_cookie_token_written") != pending:
-        _write_user_cookie(cookie_manager, pending)
-        st.rerun()
-
-    st.session_state["user_token"] = pending
-    return pending
+    return token
 
 
 # ----------------------------- API helpers ----------------------------- #
