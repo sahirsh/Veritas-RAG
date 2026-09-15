@@ -2,7 +2,7 @@
 
 A production-grade Retrieval-Augmented Generation (RAG) API that lets you upload PDF documents and ask natural-language questions about their contents. Answers are grounded in the most semantically relevant passages from your documents and returned with source citations.
 
-**Live demo:** [veritas-rag-frontend.onrender.com](https://veritas-rag-frontend.onrender.com)
+**Live demo:** [veritas-rag-frontend.onrender.com]([https://veritas-rag-frontend.onrender.com](https://veritas-rag-frontend-1068350200089.us-central1.run.app))
 
 > The demo runs on free-tier infrastructure — the first request after a period of inactivity may take up to 60 seconds to wake up. Subsequent requests are fast.
 
